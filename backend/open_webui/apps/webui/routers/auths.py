@@ -1,7 +1,11 @@
 import re
 import uuid
+#import ldap
+
+print(f"Hello from Auth file :)")
 
 from open_webui.apps.webui.models.auths import (
+    LdapForm,
     AddUserForm,
     ApiKey,
     Auths,
@@ -19,8 +23,8 @@ from open_webui.env import (
     WEBUI_AUTH_TRUSTED_EMAIL_HEADER,
     WEBUI_AUTH_TRUSTED_NAME_HEADER,
 )
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Body
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 from open_webui.utils.misc import parse_duration, validate_email_format
 from open_webui.utils.utils import (
@@ -34,6 +38,7 @@ from open_webui.utils.webhook import post_webhook
 
 router = APIRouter()
 
+
 ############################
 # GetSessionUser
 ############################
@@ -41,7 +46,7 @@ router = APIRouter()
 
 @router.get("/", response_model=UserResponse)
 async def get_session_user(
-    request: Request, response: Response, user=Depends(get_current_user)
+        request: Request, response: Response, user=Depends(get_current_user)
 ):
     token = create_token(
         data={"id": user.id},
@@ -71,7 +76,7 @@ async def get_session_user(
 
 @router.post("/update/profile", response_model=UserResponse)
 async def update_profile(
-    form_data: UpdateProfileForm, session_user=Depends(get_current_user)
+        form_data: UpdateProfileForm, session_user=Depends(get_current_user)
 ):
     if session_user:
         user = Users.update_user_by_id(
@@ -93,7 +98,7 @@ async def update_profile(
 
 @router.post("/update/password", response_model=bool)
 async def update_password(
-    form_data: UpdatePasswordForm, session_user=Depends(get_current_user)
+        form_data: UpdatePasswordForm, session_user=Depends(get_current_user)
 ):
     if WEBUI_AUTH_TRUSTED_EMAIL_HEADER:
         raise HTTPException(400, detail=ERROR_MESSAGES.ACTION_PROHIBITED)
@@ -182,6 +187,77 @@ async def signin(request: Request, response: Response, form_data: SigninForm):
 
 
 ############################
+# LDAP Authentication
+############################
+@router.post("/ldap", response_model=SigninResponse)
+async def signin(request: Request, response: Response, form_data: SigninForm):
+    print(f"Testing asdfasdf Authentication")
+    if WEBUI_AUTH_TRUSTED_EMAIL_HEADER:
+        if WEBUI_AUTH_TRUSTED_EMAIL_HEADER not in request.headers:
+            raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_TRUSTED_HEADER)
+
+        trusted_email = request.headers[WEBUI_AUTH_TRUSTED_EMAIL_HEADER].lower()
+        trusted_name = trusted_email
+        if WEBUI_AUTH_TRUSTED_NAME_HEADER:
+            trusted_name = request.headers.get(
+                WEBUI_AUTH_TRUSTED_NAME_HEADER, trusted_email
+            )
+        if not Users.get_user_by_email(trusted_email.lower()):
+            await signup(
+                request,
+                response,
+                SignupForm(
+                    email=trusted_email, password=str(uuid.uuid4()), name=trusted_name
+                ),
+            )
+        user = Auths.authenticate_user_by_trusted_header(trusted_email)
+    elif WEBUI_AUTH == False:
+        admin_email = "admin@localhost"
+        admin_password = "admin"
+
+        if Users.get_user_by_email(admin_email.lower()):
+            user = Auths.authenticate_user(admin_email.lower(), admin_password)
+        else:
+            if Users.get_num_users() != 0:
+                raise HTTPException(400, detail=ERROR_MESSAGES.EXISTING_USERS)
+
+            await signup(
+                request,
+                response,
+                SignupForm(email=admin_email, password=admin_password, name="User"),
+            )
+
+            user = Auths.authenticate_user(admin_email.lower(), admin_password)
+    else:
+        user = Auths.authenticate_user(form_data.email.lower(), form_data.password)
+
+    if user:
+        token = create_token(
+            data={"id": user.id},
+            expires_delta=parse_duration(request.app.state.config.JWT_EXPIRES_IN),
+        )
+
+        # Set the cookie token
+        response.set_cookie(
+            key="token",
+            value=token,
+            httponly=True,  # Ensures the cookie is not accessible via JavaScript
+        )
+
+        return {
+            "token": token,
+            "token_type": "Bearer",
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+            "profile_image_url": user.profile_image_url,
+        }
+    else:
+        raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_CRED)
+
+
+############################
 # SignUp
 ############################
 
@@ -189,9 +265,9 @@ async def signin(request: Request, response: Response, form_data: SigninForm):
 @router.post("/signup", response_model=SigninResponse)
 async def signup(request: Request, response: Response, form_data: SignupForm):
     if (
-        not request.app.state.config.ENABLE_SIGNUP
-        and request.app.state.config.ENABLE_LOGIN_FORM
-        and WEBUI_AUTH
+            not request.app.state.config.ENABLE_SIGNUP
+            and request.app.state.config.ENABLE_LOGIN_FORM
+            and WEBUI_AUTH
     ):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACCESS_PROHIBITED
@@ -361,7 +437,7 @@ class AdminConfig(BaseModel):
 
 @router.post("/admin/config")
 async def update_admin_config(
-    request: Request, form_data: AdminConfig, user=Depends(get_admin_user)
+        request: Request, form_data: AdminConfig, user=Depends(get_admin_user)
 ):
     request.app.state.config.SHOW_ADMIN_DETAILS = form_data.SHOW_ADMIN_DETAILS
     request.app.state.config.ENABLE_SIGNUP = form_data.ENABLE_SIGNUP
